@@ -1,5 +1,3 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -8,15 +6,19 @@
 #include <thread>
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 
 #include "common/types.hpp"
+#include "common/logger.hpp"
+#include "networking/tcp_client.hpp"
 
-#pragma comment(lib, "ws2_32.lib")
-
+using arbitrade::Logger;
+using arbitrade::TcpClient;
 using arbitrade::TickData;
 
 namespace
 {
+
     constexpr const char *SERVER_IP = "127.0.0.1";
     constexpr unsigned short SERVER_PORT = 8888;
     constexpr const char *CSV_PATH = "data/market_data.csv";
@@ -38,8 +40,8 @@ namespace
         std::vector<std::string> fields = split_csv_line(line);
         if (fields.size() != 7)
         {
-            std::cerr << "[Replayer] Skipping malformed line (expected 7 fields, got "
-                      << fields.size() << "): " << line << std::endl;
+            Logger::warn("Replayer: skipping malformed line (expected 7 fields, got " +
+                         std::to_string(fields.size()) + "): " + line);
             return false;
         }
 
@@ -55,116 +57,49 @@ namespace
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[Replayer] Failed to parse line: " << line
-                      << " (" << e.what() << ")" << std::endl;
+            Logger::error(std::string("Replayer: failed to parse line: ") + line + " (" + e.what() + ")");
             return false;
         }
 
         return true;
     }
 
-    bool send_all(SOCKET sock, const char *buffer, int length)
+    // Captures a monotonic, high-resolution timestamp in nanoseconds. Used
+    // to stamp each tick right before it goes out on the wire so the agent
+    // side can later compute one-way transport latency if needed.
+    uint64_t now_nanoseconds()
     {
-        int total_sent = 0;
-        while (total_sent < length)
-        {
-            int sent = send(sock, buffer + total_sent, length - total_sent, 0);
-            if (sent == SOCKET_ERROR)
-            {
-                std::cerr << "[Replayer] send() failed with error: "
-                          << WSAGetLastError() << std::endl;
-                return false;
-            }
-            total_sent += sent;
-        }
-        return true;
+        auto now = std::chrono::steady_clock::now();
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
     }
 
 } // namespace
 
 int main()
 {
-    std::cout << "[Replayer] NexusTrade Market Data Replayer starting..." << std::endl;
+    Logger::info("Replayer: NexusTrade Market Data Replayer starting...");
 
-    WSADATA wsa_data;
-    int wsa_result = WSAStartup(MAKEWORD(2, 2), &wsa_data);
-    if (wsa_result != 0)
+    TcpClient client;
+    if (!client.connect_to(SERVER_IP, SERVER_PORT))
     {
-        std::cerr << "[Replayer] WSAStartup failed with error: " << wsa_result << std::endl;
+        Logger::error("Replayer: could not connect to agent. Is agent.exe running and listening on port " +
+                      std::to_string(SERVER_PORT) + "?");
         return 1;
     }
-
-    SOCKET connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (connect_socket == INVALID_SOCKET)
-    {
-        std::cerr << "[Replayer] socket() failed with error: " << WSAGetLastError() << std::endl;
-        WSACleanup();
-        return 1;
-    }
-
-    sockaddr_in server_addr;
-    std::memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SERVER_PORT);
-
-    if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0)
-    {
-        std::cerr << "[Replayer] inet_pton failed for address: " << SERVER_IP << std::endl;
-        closesocket(connect_socket);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "[Replayer] Connecting to agent at " << SERVER_IP
-              << ":" << SERVER_PORT << " ..." << std::endl;
-
-    // Retry loop: gives the agent process a moment to start listening
-    constexpr int max_connect_attempts = 10;
-    int connect_attempts = 0;
-    int connect_result = SOCKET_ERROR;
-
-    while (connect_attempts < max_connect_attempts)
-    {
-        connect_result = connect(connect_socket,
-                                 reinterpret_cast<sockaddr *>(&server_addr),
-                                 sizeof(server_addr));
-        if (connect_result != SOCKET_ERROR)
-        {
-            break;
-        }
-        connect_attempts++;
-        std::cerr << "[Replayer] connect() attempt " << connect_attempts
-                  << " failed with error: " << WSAGetLastError()
-                  << ". Retrying in 500ms..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-
-    if (connect_result == SOCKET_ERROR)
-    {
-        std::cerr << "[Replayer] Could not connect to agent after "
-                  << max_connect_attempts
-                  << " attempts. Is agent.exe running and listening on port "
-                  << SERVER_PORT << "?" << std::endl;
-        closesocket(connect_socket);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "[Replayer] Connected to agent successfully." << std::endl;
 
     std::ifstream csv_file(CSV_PATH);
     if (!csv_file.is_open())
     {
-        std::cerr << "[Replayer] Failed to open CSV file at: " << CSV_PATH
-                  << " (run the binary from the project root)" << std::endl;
-        closesocket(connect_socket);
-        WSACleanup();
+        Logger::error(std::string("Replayer: failed to open CSV file at: ") + CSV_PATH +
+                      " (run the binary from the project root)");
         return 1;
     }
 
     std::string line;
     bool is_header = true;
     int ticks_sent = 0;
+    uint64_t sequence = 0;
 
     while (std::getline(csv_file, line))
     {
@@ -184,26 +119,31 @@ int main()
             continue;
         }
 
-        if (!send_all(connect_socket, reinterpret_cast<const char *>(&tick), sizeof(TickData)))
+        sequence++;
+        tick.sequence_number = sequence;
+
+        // Stamp the send timestamp as close to the wire as possible —
+        // immediately before send_all(), after all parsing is complete.
+        tick.replay_send_timestamp_ns = now_nanoseconds();
+
+        if (!client.send_all(reinterpret_cast<const char *>(&tick), sizeof(TickData)))
         {
-            std::cerr << "[Replayer] Transmission failed. Aborting replay." << std::endl;
+            Logger::error("Replayer: transmission failed. Aborting replay.");
             break;
         }
 
         ticks_sent++;
-        std::cout << "[Replayer] Sent tick #" << ticks_sent << " -> ";
+        Logger::info("Replayer: sent tick #" + std::to_string(ticks_sent));
         tick.print();
 
+        // Pace the replay so console output on both ends stays readable.
+        // Single-thread sleep, not a spawned worker thread.
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
     csv_file.close();
 
-    std::cout << "[Replayer] Replay complete. Total ticks sent: " << ticks_sent << std::endl;
-
-    shutdown(connect_socket, SD_SEND);
-    closesocket(connect_socket);
-    WSACleanup();
+    Logger::info("Replayer: replay complete. Total ticks sent: " + std::to_string(ticks_sent));
 
     return 0;
 }

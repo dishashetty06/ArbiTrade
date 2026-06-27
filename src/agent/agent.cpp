@@ -1,170 +1,66 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <iostream>
-#include <iomanip>
 #include <string>
-#include <unordered_map>
-#include <algorithm>
+#include <optional>
 #include <cstring>
 
 #include "common/types.hpp"
+#include "common/logger.hpp"
+#include "networking/tcp_server.hpp"
+#include "orderbook/order_book.hpp"
+#include "strategy/spread_detector.hpp"
 
-#pragma comment(lib, "ws2_32.lib")
-
+using arbitrade::Logger;
+using arbitrade::OrderBook;
+using arbitrade::SpreadDetector;
+using arbitrade::TcpServer;
 using arbitrade::TickData;
+using arbitrade::TradeSignal;
 
 namespace
 {
 
     constexpr unsigned short LISTEN_PORT = 8888;
 
-    struct SymbolOrderBook
+    // Formats a detected TradeSignal into a human-readable alert block.
+    // Living here (not inside SpreadDetector) keeps presentation concerns
+    // completely out of the strategy layer.
+    void log_trade_signal(const TradeSignal &signal)
     {
-        std::unordered_map<std::string, TickData> exchange_ticks;
-    };
-
-    bool recv_all(SOCKET sock, char *buffer, int length)
-    {
-        int total_received = 0;
-        while (total_received < length)
-        {
-            int received = recv(sock, buffer + total_received, length - total_received, 0);
-            if (received == 0)
-            {
-                std::cout << "[Agent] Connection closed by replayer." << std::endl;
-                return false;
-            }
-            if (received == SOCKET_ERROR)
-            {
-                std::cerr << "[Agent] recv() failed with error: " << WSAGetLastError() << std::endl;
-                return false;
-            }
-            total_received += received;
-        }
-        return true;
+        Logger::info("=====================================================");
+        Logger::info(std::string("[ARBITRAGE ALERT] ") + signal.symbol +
+                     " (triggered by seq #" + std::to_string(signal.sequence_number) + ")");
+        Logger::info(std::string("  BUY  on ") + signal.buy_exchange +
+                     " @ ask " + std::to_string(signal.buy_price));
+        Logger::info(std::string("  SELL on ") + signal.sell_exchange +
+                     " @ bid " + std::to_string(signal.sell_price));
+        Logger::info("  Spread: " + std::to_string(signal.spread) +
+                     " | Max Volume: " + std::to_string(signal.executable_volume) +
+                     " | Est. Profit: " + std::to_string(signal.estimated_profit));
+        Logger::info("=====================================================");
     }
 
-    // Optimized Arbitrage Checker: O(E) time complexity (where E is number of exchanges).
-    void check_arbitrage_for_symbol(const std::string &symbol, const SymbolOrderBook &book)
-    {
-        if (book.exchange_ticks.size() < 2)
-        {
-            return; // at least two exchanges to find an arbitrage
-        }
+} // namespace
 
-        const TickData *best_bid_tick = nullptr;
-        const TickData *best_ask_tick = nullptr;
-
-        // Find the highest bid and the lowest ask for this specific symbol
-        for (const auto &[exchange_name, tick] : book.exchange_ticks)
-        {
-            if (!best_bid_tick || tick.bid_price > best_bid_tick->bid_price)
-            {
-                best_bid_tick = &tick;
-            }
-            if (!best_ask_tick || tick.ask_price < best_ask_tick->ask_price)
-            {
-                best_ask_tick = &tick;
-            }
-        }
-
-        if (best_bid_tick && best_ask_tick &&
-            std::strcmp(best_bid_tick->exchange, best_ask_tick->exchange) != 0) // different exchanges,valid pointers
-        {
-
-            if (best_bid_tick->bid_price > best_ask_tick->ask_price) // spread is +ve
-            {
-                double spread = best_bid_tick->bid_price - best_ask_tick->ask_price;
-                double max_volume = std::min(best_bid_tick->bid_amount, best_ask_tick->ask_amount);
-                double estimated_profit = spread * max_volume;
-
-                std::cout << " " << std::endl;
-                std::cout << "[ARBITRAGE ALERT] " << symbol << std::endl;
-                std::cout << "  BUY  on " << std::setw(8) << std::left << best_ask_tick->exchange
-                          << " @ ask " << std::fixed << std::setprecision(2) << best_ask_tick->ask_price
-                          << " (avail: " << best_ask_tick->ask_amount << ")" << std::endl;
-                std::cout << "  SELL on " << std::setw(8) << std::left << best_bid_tick->exchange
-                          << " @ bid " << best_bid_tick->bid_price
-                          << " (avail: " << best_bid_tick->bid_amount << ")" << std::endl;
-                std::cout << "  Spread: " << spread
-                          << " | Max Volume: " << max_volume
-                          << " | Est. Profit: $" << estimated_profit << std::endl;
-                std::cout << " " << std::endl;
-            }
-        }
-    }
-
-}
-// namespace
 int main()
 {
-    std::cout << "[Agent] ArbiTrade Trading Agent starting..." << std::endl;
+    Logger::info("Agent: NexusTrade Trading Agent starting...");
 
-    WSADATA wsa_data;
-    int wsa_result = WSAStartup(MAKEWORD(2, 2), &wsa_data);
-    if (wsa_result != 0)
+    TcpServer server;
+    if (!server.start_listening(LISTEN_PORT))
     {
-        std::cerr << "[Agent] WSAStartup failed with error: " << wsa_result << std::endl;
+        Logger::error("Agent: failed to start listening on port " + std::to_string(LISTEN_PORT));
         return 1;
     }
 
-    SOCKET listen_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_socket == INVALID_SOCKET)
+    Logger::info("Agent: waiting for replayer connection...");
+    if (!server.accept_client())
     {
-        std::cerr << "[Agent] socket() failed with error: " << WSAGetLastError() << std::endl;
-        WSACleanup();
+        Logger::error("Agent: failed to accept incoming connection.");
         return 1;
     }
 
-    int reuse_opt = 1;
-    setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR,
-               reinterpret_cast<const char *>(&reuse_opt), sizeof(reuse_opt));
-
-    sockaddr_in service_addr;
-    std::memset(&service_addr, 0, sizeof(service_addr));
-    service_addr.sin_family = AF_INET;
-    service_addr.sin_addr.s_addr = INADDR_ANY;
-    service_addr.sin_port = htons(LISTEN_PORT);
-
-    if (bind(listen_socket, reinterpret_cast<sockaddr *>(&service_addr), sizeof(service_addr)) == SOCKET_ERROR)
-    {
-        std::cerr << "[Agent] bind() failed with error: " << WSAGetLastError() << std::endl;
-        closesocket(listen_socket);
-        WSACleanup();
-        return 1;
-    }
-
-    if (listen(listen_socket, SOMAXCONN) == SOCKET_ERROR)
-    {
-        std::cerr << "[Agent] listen() failed with error: " << WSAGetLastError() << std::endl;
-        closesocket(listen_socket);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "[Agent] Listening on port " << LISTEN_PORT
-              << " for incoming replayer connection..." << std::endl;
-
-    sockaddr_in client_addr;
-    int client_addr_len = sizeof(client_addr);
-    SOCKET client_socket = accept(listen_socket,
-                                  reinterpret_cast<sockaddr *>(&client_addr),
-                                  &client_addr_len);
-
-    if (client_socket == INVALID_SOCKET)
-    {
-        std::cerr << "[Agent] accept() failed with error: " << WSAGetLastError() << std::endl;
-        closesocket(listen_socket);
-        WSACleanup();
-        return 1;
-    }
-
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-    std::cout << "[Agent] Replayer connected from " << client_ip
-              << ":" << ntohs(client_addr.sin_port) << std::endl;
-
-    std::unordered_map<std::string, SymbolOrderBook> market_state;
+    OrderBook book;
+    SpreadDetector detector;
     int ticks_received = 0;
 
     while (true)
@@ -172,25 +68,32 @@ int main()
         TickData incoming_tick;
         char *tick_buffer = reinterpret_cast<char *>(&incoming_tick);
 
-        if (!recv_all(client_socket, tick_buffer, sizeof(TickData)))
+        if (!server.recv_all(tick_buffer, sizeof(TickData)))
         {
             break;
         }
 
         ticks_received++;
-        std::cout << "[Agent] Received tick #" << ticks_received << " -> ";
+        Logger::info("Agent: received tick #" + std::to_string(ticks_received));
         incoming_tick.print();
 
-        market_state[incoming_tick.symbol].exchange_ticks[incoming_tick.exchange] = incoming_tick;
+        // Step 1: fold the new tick into the order book's top-of-book state.
+        book.update(incoming_tick);
 
-        check_arbitrage_for_symbol(incoming_tick.symbol, market_state[incoming_tick.symbol]); // only check for updated symbol
+        // Step 2: ask the strategy layer whether this update created (or
+        // revealed) a crossed-market arbitrage opportunity.
+        std::optional<TradeSignal> signal = detector.detect(
+            book, std::string(incoming_tick.symbol), incoming_tick.sequence_number);
+
+        // Step 3: if a signal was generated, log it. No execution logic
+        // lives here — this phase only detects and reports.
+        if (signal.has_value())
+        {
+            log_trade_signal(signal.value());
+        }
     }
 
-    std::cout << "[Agent] Stream ended. Total ticks processed: " << ticks_received << std::endl;
-
-    closesocket(client_socket);
-    closesocket(listen_socket);
-    WSACleanup();
+    Logger::info("Agent: stream ended. Total ticks processed: " + std::to_string(ticks_received));
 
     return 0;
 }
