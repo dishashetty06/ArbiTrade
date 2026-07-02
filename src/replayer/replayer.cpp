@@ -3,10 +3,12 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <memory>
 #include <thread>
 #include <chrono>
 #include <cstring>
 #include <cstdint>
+#include <stdexcept>
 
 #include "common/types.hpp"
 #include "common/logger.hpp"
@@ -20,8 +22,6 @@ namespace
 {
 
     constexpr const char *SERVER_IP = "127.0.0.1";
-    constexpr unsigned short SERVER_PORT = 8888;
-    constexpr const char *CSV_PATH = "data/market_data.csv";
 
     std::vector<std::string> split_csv_line(const std::string &line)
     {
@@ -64,9 +64,6 @@ namespace
         return true;
     }
 
-    // Captures a monotonic, high-resolution timestamp in nanoseconds. Used
-    // to stamp each tick right before it goes out on the wire so the agent
-    // side can later compute one-way transport latency if needed.
     uint64_t now_nanoseconds()
     {
         auto now = std::chrono::steady_clock::now();
@@ -76,23 +73,68 @@ namespace
 
 } // namespace
 
-int main()
+int main(int argc, char *argv[])
 {
-    Logger::info("Replayer: NexusTrade Market Data Replayer starting...");
-
-    TcpClient client;
-    if (!client.connect_to(SERVER_IP, SERVER_PORT))
+    if (argc < 3)
     {
-        Logger::error("Replayer: could not connect to agent. Is agent.exe running and listening on port " +
-                      std::to_string(SERVER_PORT) + "?");
+        std::cerr << "Usage: replayer.exe <CSV_PATH> <PORT_1> [PORT_2] [PORT_3] ..." << std::endl;
         return 1;
     }
 
-    std::ifstream csv_file(CSV_PATH);
+    std::string csv_path = argv[1];
+
+    std::vector<unsigned short> target_ports;
+    for (int i = 2; i < argc; ++i)
+    {
+        try
+        {
+            int parsed = std::stoi(argv[i]);
+            if (parsed <= 0 || parsed > 65535)
+            {
+                throw std::out_of_range("port must be between 1 and 65535");
+            }
+            target_ports.push_back(static_cast<unsigned short>(parsed));
+        }
+        catch (const std::exception &e)
+        {
+            Logger::error(std::string("Replayer: invalid port argument '") + argv[i] + "': " + e.what());
+            return 1;
+        }
+    }
+
+    Logger::info("Replayer: NexusTrade/ArbiTrade Market Data Replayer starting, targeting " +
+                 std::to_string(target_ports.size()) + " agent(s)...");
+
+    // Each TcpClient is non-copyable, so the broadcast list is a vector
+    // of owning pointers rather than a vector of TcpClient by value.
+    std::vector<std::unique_ptr<TcpClient>> agent_clients;
+    agent_clients.reserve(target_ports.size());
+
+    for (unsigned short port : target_ports)
+    {
+        auto client = std::make_unique<TcpClient>();
+        if (client->connect_to(SERVER_IP, port))
+        {
+            Logger::info("Replayer: connected to agent on port " + std::to_string(port));
+            agent_clients.push_back(std::move(client));
+        }
+        else
+        {
+            Logger::error("Replayer: failed to connect to agent on port " + std::to_string(port) +
+                          ". It will be excluded from this replay.");
+        }
+    }
+
+    if (agent_clients.empty())
+    {
+        Logger::error("Replayer: no agents reachable on any provided port. Aborting.");
+        return 1;
+    }
+
+    std::ifstream csv_file(csv_path);
     if (!csv_file.is_open())
     {
-        Logger::error(std::string("Replayer: failed to open CSV file at: ") + CSV_PATH +
-                      " (run the binary from the project root)");
+        Logger::error("Replayer: failed to open CSV file at: " + csv_path);
         return 1;
     }
 
@@ -121,23 +163,42 @@ int main()
 
         sequence++;
         tick.sequence_number = sequence;
-
-        // Stamp the send timestamp as close to the wire as possible —
-        // immediately before send_all(), after all parsing is complete.
         tick.replay_send_timestamp_ns = now_nanoseconds();
 
-        if (!client.send_all(reinterpret_cast<const char *>(&tick), sizeof(TickData)))
+        // Fan out this tick to every still-connected agent. Single
+        // thread, sequential sends — this is the TCP equivalent of a UDP
+        // broadcast given the "no std::thread" constraint, not a true
+        // simultaneous send, but every agent receives the same tick
+        // before the replayer advances to the next one.
+        std::vector<size_t> dead_client_indices;
+
+        for (size_t i = 0; i < agent_clients.size(); ++i)
         {
-            Logger::error("Replayer: transmission failed. Aborting replay.");
+            if (!agent_clients[i]->send_all(reinterpret_cast<const char *>(&tick), sizeof(TickData)))
+            {
+                Logger::error("Replayer: send to an agent failed; removing it from the broadcast list.");
+                dead_client_indices.push_back(i);
+            }
+        }
+
+        for (auto it = dead_client_indices.rbegin(); it != dead_client_indices.rend(); ++it)
+        {
+            agent_clients.erase(agent_clients.begin() + static_cast<long>(*it));
+        }
+
+        if (agent_clients.empty())
+        {
+            Logger::error("Replayer: all agent connections lost. Aborting replay.");
             break;
         }
 
         ticks_sent++;
-        Logger::info("Replayer: sent tick #" + std::to_string(ticks_sent));
+        Logger::info("Replayer: broadcast tick #" + std::to_string(ticks_sent) +
+                     " to " + std::to_string(agent_clients.size()) + " agent(s)");
         tick.print();
 
-        // Pace the replay so console output on both ends stays readable.
-        // Single-thread sleep, not a spawned worker thread.
+        // Pace the replay so console output across all agents stays
+        // readable. Single-thread sleep, not a spawned worker thread.
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 

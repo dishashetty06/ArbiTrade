@@ -128,5 +128,31 @@ namespace arbitrade
         }
         return true;
     }
+    bool TcpClient::recv_all(char *buffer, int length)
+    {
+        if (connect_socket_ == INVALID_SOCKET)
+        {
+            Logger::error("TcpClient: recv_all() called with no active connection.");
+            return false;
+        }
 
-} // namespace nexustrade
+        int total_received = 0;
+        while (total_received < length)
+        {
+            int received = recv(connect_socket_, buffer + total_received, length - total_received, 0);
+            if (received == 0)
+            {
+                Logger::error("TcpClient: connection closed by peer during recv_all().");
+                return false;
+            }
+            if (received == SOCKET_ERROR)
+            {
+                Logger::error("TcpClient: recv() failed with error: " + std::to_string(WSAGetLastError()));
+                return false;
+            }
+            total_received += received;
+        }
+        return true;
+    }
+
+} // namespace arbitrade

@@ -6,7 +6,6 @@
 
 namespace arbitrade
 {
-
     // RAII-compliant TCP client wrapper around WinSock2. Owns the connection
     // socket and handles a bounded retry loop on connect() so the replayer
     // can be launched slightly before or after the agent without failing
@@ -30,6 +29,13 @@ namespace arbitrade
         // payload has been written to the socket. Returns false on error.
         bool send_all(const char *buffer, int length);
 
+        // Reads exactly `length` bytes into `buffer`, blocking until the
+        // full payload has arrived (or the connection drops). Mirrors
+        // TcpServer::recv_all() — added in Phase 4 because clients (the
+        // agent, talking to the lock server) now need a request/response
+        // round trip instead of pure fire-and-forget sends.
+        bool recv_all(char *buffer, int length);
+
         bool is_connected() const { return connect_socket_ != INVALID_SOCKET; }
 
     private:
@@ -39,4 +45,4 @@ namespace arbitrade
         SOCKET connect_socket_;
     };
 
-} // namespace nexustrade
+} // namespace arbitrade

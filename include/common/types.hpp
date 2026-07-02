@@ -104,4 +104,38 @@ namespace arbitrade
     };
 #pragma pack(pop)
 
+// Sent by an agent to the lock server: "I want exclusive rights to trade
+// `symbol` for the next `duration_ms` milliseconds." Packed for the same
+// wire-safety reasons as TickData/TradeSignal above.
+#pragma pack(push, 1)
+    struct LockRequest
+    {
+        char symbol[16];      // Null-terminated symbol the agent wants to lock (e.g. "BTCUSDT")
+        uint64_t duration_ms; // How long the lock should be held if granted
+
+        LockRequest() : duration_ms(0)
+        {
+            std::memset(symbol, 0, sizeof(symbol));
+        }
+    };
+#pragma pack(pop)
+
+    static_assert(sizeof(LockRequest) == 16 + 8,
+                  "LockRequest layout drifted from expected packed size — "
+                  "agent/lock_server wire format would desync.");
+
+// Sent by the lock server back to the requesting agent: whether the lock
+// was granted.
+#pragma pack(push, 1)
+    struct LockResponse
+    {
+        bool success;
+
+        LockResponse() : success(false) {}
+    };
+#pragma pack(pop)
+
+    static_assert(sizeof(LockResponse) == 1,
+                  "LockResponse layout drifted from expected packed size.");
+
 } // namespace arbitrade

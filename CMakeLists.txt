@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(arbitrade VERSION 2.0.0 LANGUAGES CXX)
+project(arbitrade VERSION 4.0.0 LANGUAGES CXX)
 
 # --- C++ Standard ---
 set(CMAKE_CXX_STANDARD 20)
@@ -10,9 +10,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# --- Global include path so any target can do #include "common/types.hpp" ---
+# --- Global include path: all public headers live under include/arbitrade/...
 include_directories(${CMAKE_SOURCE_DIR}/include)
-include_directories(${CMAKE_SOURCE_DIR}/src)
 
 # --- MSVC specific compiler flags ---
 if(MSVC)
@@ -27,9 +26,9 @@ endif()
 # -----------------------------------------------------------------------
 # Core library: every shared, transport-agnostic module (networking,
 # orderbook, strategy) is compiled exactly ONCE here as a static
-# library. Both replayer.exe and agent.exe link against it, so there is
-# a single source of truth for the networking/strategy code and no
-# duplicate compilation of these .cpp files across the two binaries.
+# library. replayer.exe, agent.exe, and lock_server.exe all link
+# against it, so there is a single source of truth for this code and no
+# duplicate compilation across binaries.
 # -----------------------------------------------------------------------
 add_library(arbitrade_core STATIC
     src/networking/tcp_server.cpp
@@ -39,12 +38,11 @@ add_library(arbitrade_core STATIC
 )
 
 target_include_directories(arbitrade_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(arbitrade_core PRIVATE ${CMAKE_SOURCE_DIR}/src)
-
 target_link_libraries(arbitrade_core PUBLIC ws2_32)
 
 # --- Subprojects ---
 add_subdirectory(src/replayer)
 add_subdirectory(src/agent)
+add_subdirectory(src/lock_server)
 
 message(STATUS "ArbiTrade configured: CXX=${CMAKE_CXX_STANDARD}, BuildType=${CMAKE_BUILD_TYPE}")
