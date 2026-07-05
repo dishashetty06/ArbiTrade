@@ -3,6 +3,10 @@
 #include <optional>
 #include <cstring>
 #include <stdexcept>
+#include <chrono>
+#include <vector>
+#include <algorithm>
+#include <numeric>
 
 #include "common/types.hpp"
 #include "common/logger.hpp"
@@ -27,6 +31,52 @@ namespace
     constexpr const char *LOCK_SERVER_IP = "127.0.0.1";
     constexpr unsigned short LOCK_SERVER_PORT = 7777;
     constexpr uint64_t LOCK_DURATION_MS = 50;
+
+    // --- NEW: High-resolution timestamp capture ---
+    uint64_t now_nanoseconds()
+    {
+        auto now = std::chrono::steady_clock::now();
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+    }
+
+    // --- NEW: Metrics engine to calculate percentiles ---
+    class LatencyTracker
+    {
+    public:
+        void record(uint64_t latency_ns)
+        {
+            latencies_.push_back(latency_ns);
+        }
+
+        void print_metrics(const std::string &agent_name)
+        {
+            if (latencies_.empty())
+                return;
+
+            std::vector<uint64_t> sorted = latencies_;
+            std::sort(sorted.begin(), sorted.end());
+
+            uint64_t min_us = sorted.front() / 1000;
+            uint64_t max_us = sorted.back() / 1000;
+            uint64_t avg_us = (std::accumulate(sorted.begin(), sorted.end(), 0ULL) / sorted.size()) / 1000;
+            uint64_t p95_us = sorted[sorted.size() * 95 / 100] / 1000;
+            uint64_t p99_us = sorted[sorted.size() * 99 / 100] / 1000;
+
+            Logger::info("");
+            Logger::info("=== " + agent_name + " LATENCY REPORT (Microseconds) ===");
+            Logger::info(" Trades Attempted : " + std::to_string(latencies_.size()));
+            Logger::info(" Min Latency      : " + std::to_string(min_us) + " us");
+            Logger::info(" Avg Latency      : " + std::to_string(avg_us) + " us");
+            Logger::info(" P95 Latency      : " + std::to_string(p95_us) + " us");
+            Logger::info(" P99 Latency      : " + std::to_string(p99_us) + " us");
+            Logger::info(" Max Latency      : " + std::to_string(max_us) + " us");
+            Logger::info("=====================================================");
+        }
+
+    private:
+        std::vector<uint64_t> latencies_;
+    };
 
     // Formats a detected TradeSignal into a human-readable alert block,
     // tagged with this agent's identity so multi-agent logs stay readable.
@@ -107,6 +157,7 @@ int main(int argc, char *argv[])
 
     OrderBook book;
     SpreadDetector detector;
+    LatencyTracker tracker;
     int ticks_received = 0;
 
     while (true)
@@ -121,7 +172,7 @@ int main(int argc, char *argv[])
 
         ticks_received++;
         Logger::info("[" + agent_name + "] received tick #" + std::to_string(ticks_received));
-        incoming_tick.print();
+        // incoming_tick.print();
 
         // Step 1: fold the new tick into the order book's top-of-book state.
         book.update(incoming_tick);
@@ -168,10 +219,25 @@ int main(int argc, char *argv[])
         {
             Logger::info("[MISSED] " + agent_name + " was too slow.");
         }
+        // --- NEW: Calculate Latency immediately after lock resolves ---
+        uint64_t t_now = now_nanoseconds();
+        uint64_t latency_ns = t_now - incoming_tick.replay_send_timestamp_ns;
+        tracker.record(latency_ns);
+
+        // --- NEW: Print Validation Ledger ---
+        std::string result_str = lock_response.success ? "ACQUIRED" : "REJECTED";
+        std::string log_line = "[VALIDATION] Tick #" + std::to_string(incoming_tick.sequence_number) +
+                               " | " + agent_name +
+                               " | RESULT: " + result_str +
+                               " | Latency: " + std::to_string(latency_ns / 1000) + "us";
+
+        Logger::info(log_line);
     }
 
     Logger::info("Agent: '" + agent_name + "' stream ended. Total ticks processed: " +
                  std::to_string(ticks_received));
+
+    tracker.print_metrics(agent_name);
 
     return 0;
 }
