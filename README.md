@@ -16,9 +16,9 @@ ArbiTrade is a high-performance, multi-agent trading simulator designed to detec
 ## Architecture Overview
 
 ```
- ┌─────────────────────────────────────────────────────────────────────┐
+ ┌────────────────────────────────────────────────────────────────────┐
  │                         ArbiTrade System                           │
- │                                                                     │
+ │                                                                    │
  │   ┌────────────┐  TickData (TCP)   ┌──────────┐                    │
  │   │            │ ─────────────────>│ Agent A  │──┐                 │
  │   │  Replayer  │  TickData (TCP)   ├──────────┤  │  LockRequest    │
@@ -31,9 +31,7 @@ ArbiTrade is a high-performance, multi-agent trading simulator designed to detec
  │                                                     │  (port     │ │
  │                                                     │   7777)    │ │
  │                                                     └────────────┘ │
- └─────────────────────────────────────────────────────────────────────┘
-
----
+ └────────────────────────────────────────────────────────────────────┘
 
 ```
 
