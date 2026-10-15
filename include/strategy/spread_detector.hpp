@@ -30,4 +30,4 @@ namespace arbitrade
                                           uint64_t latest_sequence_number) const;
     };
 
-} // namespace nexustrade
+} // namespace arbitrade

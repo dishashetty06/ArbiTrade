@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# --- Global include path: all public headers live under include/arbitrade/...
+# --- Global include path: all public headers live under include/<module>/...
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # --- MSVC specific compiler flags ---

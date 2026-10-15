@@ -48,4 +48,4 @@ namespace arbitrade
         SOCKET client_socket_;
     };
 
-} // namespace nexustrade
+} // namespace arbitrade

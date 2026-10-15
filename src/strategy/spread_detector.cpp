@@ -81,4 +81,4 @@ namespace arbitrade
         return best_signal;
     }
 
-} // namespace nexustrade
+} // namespace arbitrade

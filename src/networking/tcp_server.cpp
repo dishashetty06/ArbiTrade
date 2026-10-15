@@ -4,8 +4,6 @@
 #include <cstring>
 #include <string>
 
-#pragma comment(lib, "ws2_32.lib")
-
 namespace arbitrade
 {
 
@@ -151,4 +149,4 @@ namespace arbitrade
         return true;
     }
 
-} // namespace nexustrade
+} // namespace arbitrade
