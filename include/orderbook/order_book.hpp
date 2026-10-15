@@ -32,7 +32,10 @@ namespace arbitrade
         {
             std::size_t h1 = std::hash<std::string>{}(key.exchange);
             std::size_t h2 = std::hash<std::string>{}(key.symbol);
-            return h1 ^ (h2 << 1); // boost::hash_combine-style mixing
+            // boost::hash_combine: the golden-ratio constant and shifts
+            // spread h2's bits across the result so that swapped or
+            // similar (exchange, symbol) pairs don't collide.
+            return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
         }
     };
 
@@ -66,4 +69,4 @@ namespace arbitrade
         std::unordered_map<BookKey, TickData, BookKeyHash> book_;
     };
 
-} // namespace nexustrade
+} // namespace arbitrade

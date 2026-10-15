@@ -104,6 +104,10 @@ namespace arbitrade
     };
 #pragma pack(pop)
 
+    // 16 * 3 (venue + symbol names) + 8 * 5 (doubles) + 8 (sequence_number) = 96 bytes.
+    static_assert(sizeof(TradeSignal) == (16 * 3) + (8 * 5) + 8,
+                  "TradeSignal layout drifted from expected packed size.");
+
 // Sent by an agent to the lock server: "I want exclusive rights to trade
 // `symbol` for the next `duration_ms` milliseconds." Packed for the same
 // wire-safety reasons as TickData/TradeSignal above.
