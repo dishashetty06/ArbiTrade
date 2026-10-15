@@ -1,8 +1,10 @@
 // Bump FD_SETSIZE before including winsock2.h so select() can track more
 // than the Windows default of 64 sockets if the agent fleet grows. We
 // only expect a handful of agents in this simulator, but this keeps the
-// ceiling explicit rather than silently inherited.
-#define FD_SETSIZE 64
+// ceiling explicit rather than silently inherited. On Windows, fd_set is
+// an array of FD_SETSIZE sockets, and FD_SET silently ignores any socket
+// past that limit, so main() also refuses connections beyond it.
+#define FD_SETSIZE 256
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -12,11 +14,10 @@
 #include <chrono>
 #include <cstring>
 #include <cstdint>
+#include <cstddef>
 
 #include "common/types.hpp"
 #include "common/logger.hpp"
-
-#pragma comment(lib, "ws2_32.lib")
 
 using arbitrade::LockRequest;
 using arbitrade::LockResponse;
@@ -196,7 +197,15 @@ int main()
 
             if (new_client_sock != INVALID_SOCKET)
             {
-                if (set_non_blocking(new_client_sock))
+                // One fd_set slot is taken by the listening socket, so at
+                // most FD_SETSIZE - 1 agents can be watched by select().
+                if (clients.size() >= static_cast<size_t>(FD_SETSIZE - 1))
+                {
+                    Logger::warn("LockServer: at capacity (" + std::to_string(clients.size()) +
+                                 " agents); rejecting new connection.");
+                    closesocket(new_client_sock);
+                }
+                else if (set_non_blocking(new_client_sock))
                 {
                     ClientConnection new_conn{};
                     new_conn.sock = new_client_sock;
@@ -314,7 +323,7 @@ int main()
         // indices in the vector remain valid during erase.
         for (auto it = indices_to_remove.rbegin(); it != indices_to_remove.rend(); ++it)
         {
-            clients.erase(clients.begin() + static_cast<long>(*it));
+            clients.erase(clients.begin() + static_cast<std::ptrdiff_t>(*it));
         }
     }
 
