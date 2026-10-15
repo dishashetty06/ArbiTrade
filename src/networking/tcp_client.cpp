@@ -5,8 +5,6 @@
 #include <thread>
 #include <chrono>
 
-#pragma comment(lib, "ws2_32.lib")
-
 namespace arbitrade
 {
 
@@ -29,7 +27,7 @@ namespace arbitrade
         cleanup_all();
     }
 
-    void TcpClient::cleanup_all()
+    void TcpClient::disconnect()
     {
         if (connect_socket_ != INVALID_SOCKET)
         {
@@ -37,6 +35,11 @@ namespace arbitrade
             closesocket(connect_socket_);
             connect_socket_ = INVALID_SOCKET;
         }
+    }
+
+    void TcpClient::cleanup_all()
+    {
+        disconnect();
         if (wsa_initialized_)
         {
             WSACleanup();
@@ -53,12 +56,9 @@ namespace arbitrade
             return false;
         }
 
-        connect_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (connect_socket_ == INVALID_SOCKET)
-        {
-            Logger::error("TcpClient: socket() failed with error: " + std::to_string(WSAGetLastError()));
-            return false;
-        }
+        // Drop any previous (possibly dead) connection so connect_to() can
+        // be called again to reconnect.
+        disconnect();
 
         sockaddr_in server_addr;
         std::memset(&server_addr, 0, sizeof(server_addr));
@@ -68,27 +68,40 @@ namespace arbitrade
         if (inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr) <= 0)
         {
             Logger::error("TcpClient: inet_pton failed for host: " + host);
-            cleanup_all();
             return false;
         }
 
         Logger::info("TcpClient: connecting to " + host + ":" + std::to_string(port) + " ...");
 
-        int attempts = 0;
-        int connect_result = SOCKET_ERROR;
-
-        while (attempts < max_attempts)
+        for (int attempt = 1; attempt <= max_attempts; ++attempt)
         {
-            connect_result = connect(connect_socket_,
-                                     reinterpret_cast<sockaddr *>(&server_addr),
-                                     sizeof(server_addr));
-            if (connect_result != SOCKET_ERROR)
+            // A socket whose connect() failed is in an unspecified state
+            // (POSIX requires closing it), so every attempt gets a fresh one.
+            connect_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (connect_socket_ == INVALID_SOCKET)
+            {
+                Logger::error("TcpClient: socket() failed with error: " + std::to_string(WSAGetLastError()));
+                return false;
+            }
+
+            if (connect(connect_socket_,
+                        reinterpret_cast<sockaddr *>(&server_addr),
+                        sizeof(server_addr)) != SOCKET_ERROR)
+            {
+                Logger::info("TcpClient: connected successfully.");
+                return true;
+            }
+
+            int err = WSAGetLastError();
+            disconnect();
+
+            if (attempt == max_attempts)
             {
                 break;
             }
-            attempts++;
-            Logger::warn("TcpClient: connect() attempt " + std::to_string(attempts) +
-                         " failed with error: " + std::to_string(WSAGetLastError()) +
+
+            Logger::warn("TcpClient: connect() attempt " + std::to_string(attempt) +
+                         " failed with error: " + std::to_string(err) +
                          ". Retrying in " + std::to_string(retry_delay_ms) + "ms...");
 
             // Bounded retry backoff only — this pauses the single calling
@@ -96,15 +109,8 @@ namespace arbitrade
             std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
         }
 
-        if (connect_result == SOCKET_ERROR)
-        {
-            Logger::error("TcpClient: could not connect after " + std::to_string(max_attempts) + " attempts.");
-            cleanup_all();
-            return false;
-        }
-
-        Logger::info("TcpClient: connected successfully.");
-        return true;
+        Logger::error("TcpClient: could not connect after " + std::to_string(max_attempts) + " attempts.");
+        return false;
     }
 
     bool TcpClient::send_all(const char *buffer, int length)
@@ -122,12 +128,14 @@ namespace arbitrade
             if (sent == SOCKET_ERROR)
             {
                 Logger::error("TcpClient: send() failed with error: " + std::to_string(WSAGetLastError()));
+                disconnect();
                 return false;
             }
             total_sent += sent;
         }
         return true;
     }
+
     bool TcpClient::recv_all(char *buffer, int length)
     {
         if (connect_socket_ == INVALID_SOCKET)
@@ -143,11 +151,13 @@ namespace arbitrade
             if (received == 0)
             {
                 Logger::error("TcpClient: connection closed by peer during recv_all().");
+                disconnect();
                 return false;
             }
             if (received == SOCKET_ERROR)
             {
                 Logger::error("TcpClient: recv() failed with error: " + std::to_string(WSAGetLastError()));
+                disconnect();
                 return false;
             }
             total_received += received;

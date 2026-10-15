@@ -32,7 +32,18 @@ namespace
     constexpr unsigned short LOCK_SERVER_PORT = 7777;
     constexpr uint64_t LOCK_DURATION_MS = 50;
 
+    // Mid-stream reconnects are kept short so a dead lock server doesn't
+    // stall the market-data loop for seconds at a time.
+    constexpr int LOCK_RECONNECT_ATTEMPTS = 3;
+    constexpr int LOCK_RECONNECT_DELAY_MS = 100;
+
     // --- NEW: High-resolution timestamp capture ---
+    // Latency is computed by subtracting the replayer's timestamp (taken
+    // in a different process) from this one. The C++ standard doesn't
+    // promise steady_clock is shared across processes, but on Windows/MSVC
+    // it is backed by QueryPerformanceCounter, which is system-wide, so
+    // the subtraction is valid as long as both processes run on the same
+    // machine.
     uint64_t now_nanoseconds()
     {
         auto now = std::chrono::steady_clock::now();
@@ -197,6 +208,21 @@ int main(int argc, char *argv[])
         std::memset(lock_request.symbol, 0, sizeof(lock_request.symbol));
         std::strncpy(lock_request.symbol, sig.symbol, sizeof(lock_request.symbol) - 1);
         lock_request.duration_ms = LOCK_DURATION_MS;
+
+        // A failed send/recv on a previous signal closes the connection.
+        // Try to re-establish it rather than failing every signal from
+        // here on; if the lock server is still down, skip this signal.
+        if (!lock_client.is_connected())
+        {
+            Logger::warn("Agent: '" + agent_name + "' lost lock server connection; reconnecting...");
+            if (!lock_client.connect_to(LOCK_SERVER_IP, LOCK_SERVER_PORT,
+                                        LOCK_RECONNECT_ATTEMPTS, LOCK_RECONNECT_DELAY_MS))
+            {
+                Logger::error("Agent: '" + agent_name + "' could not reconnect to lock server; skipping signal.");
+                continue;
+            }
+            Logger::info("Agent: '" + agent_name + "' reconnected to lock server.");
+        }
 
         if (!lock_client.send_all(reinterpret_cast<const char *>(&lock_request), sizeof(LockRequest)))
         {
