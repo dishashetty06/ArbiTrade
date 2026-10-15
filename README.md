@@ -2,7 +2,7 @@
 
 **A multi-agent, distributed arbitrage network simulator built in pure C++.**
 
-ArbiTrade is a high-performance, multi-agent trading simulator designed to detect cross-exchange arbitrage opportunities in real-time. Instead of relying on heavy third-party dependencies (like Redis or gRPC), this system utilizes a custom TCP multiplexed lock server, a zero-allocation hot path, and a packed binary wire protocol to achieve microsecond-level concurrency control.
+ArbiTrade is a high-performance, multi-agent trading simulator designed to detect cross-exchange arbitrage opportunities in real-time. Instead of relying on heavy third-party dependencies (like Redis or gRPC), this system utilizes a custom TCP multiplexed lock server, a single-threaded event loop, and a packed binary wire protocol to achieve microsecond-level concurrency control.
 
 ---
 
@@ -10,8 +10,9 @@ ArbiTrade is a high-performance, multi-agent trading simulator designed to detec
 
 1. Custom Distributed Mutex Engine: Bypasses the overhead of external databases by implementing a single-threaded Lock Server. It uses OS-level I/O multiplexing (select()) to resolve race conditions between competing trading agents atomically.
 2. Zero-Serialization Wire Protocol: Eliminates JSON/Protobuf parsing overhead. Market data and lock requests are transmitted as #pragma pack(1) POD (Plain Old Data) structs, allowing direct memory-mapping (memcpy) straight off the network card.
-3. Algorithmic Spread Detection: Evaluates market crosses, ensuring order book updates are processed instantly without redundant nested loops.
-4. Sub-Millisecond Telemetry Engine: Features a built-in metric tracker that captures wire-to-execution latency, automatically calculating and reporting Min, Max, Average, P95, and P99 latencies in pure microseconds.
+3. Algorithmic Spread Detection: On every order book update, compares each pair of venues quoting the symbol and picks the crossed market with the highest estimated profit (spread × executable volume). The pairwise scan is O(n²) in the number of venues, which is negligible for a handful of exchanges.
+4. Fair Broadcast: The replayer fans each tick out to agents sequentially over TCP, rotating which agent is sent to first on every tick so no agent gets a permanent head start in the lock race.
+5. Sub-Millisecond Telemetry Engine: Features a built-in metric tracker that captures wire-to-execution latency, automatically calculating and reporting Min, Max, Average, P95, and P99 latencies in pure microseconds.
 
 ## Architecture Overview
 
@@ -44,7 +45,7 @@ ArbiTrade is a high-performance, multi-agent trading simulator designed to detec
 | **OS**           | Windows 10 / 11   | Native Windows build — WSL is not supported       |
 | **Compiler**     | MSVC (Visual C++) | Part of Visual Studio 2019 or 2022                |
 | **Build Tool**   | CMake             | 3.20 or higher                                    |
-| **C++ Standard** | C++20             | Required for `std::optional`, structured bindings |
+| **C++ Standard** | C++20             | Set in CMakeLists.txt (the code itself uses C++17 features such as `std::optional`) |
 
 > **Opening the right terminal matters.** All build commands below must be run from a **Developer Command Prompt for VS** (or **Developer PowerShell for VS**), not a plain `cmd` or PowerShell window. This is what puts `cl.exe`, `nmake.exe`, and the MSVC toolchain on your `PATH`.
 >
@@ -89,9 +90,9 @@ cmake --build . --config Release
 
 ## Running the System
 
-The four processes must be started **in this exact order**, because each process blocks until the next one in the chain connects to it.
+Start four processes (the lock server, two agents, and the replayer) **in this order**. Each agent connects to the lock server on startup (retrying for about 5 seconds), then blocks until the replayer connects to it. The replayer needs every agent to already be listening.
 
-Open **four separate terminal windows**, all from the **project root** (`C:\arbitrade\`), not from inside `build\`.
+Open **four separate terminal windows**, all from the **project root** (the folder you cloned into), not from inside `build\`.
 
 ---
 
