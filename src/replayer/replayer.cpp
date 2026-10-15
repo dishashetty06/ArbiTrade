@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstddef>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -102,7 +104,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    Logger::info("Replayer: NexusTrade/ArbiTrade Market Data Replayer starting, targeting " +
+    Logger::info("Replayer: ArbiTrade Market Data Replayer starting, targeting " +
                  std::to_string(target_ports.size()) + " agent(s)...");
 
     // Each TcpClient is non-copyable, so the broadcast list is a vector
@@ -163,17 +165,30 @@ int main(int argc, char *argv[])
 
         sequence++;
         tick.sequence_number = sequence;
-        tick.replay_send_timestamp_ns = now_nanoseconds();
 
         // Fan out this tick to every still-connected agent. Single
         // thread, sequential sends — this is the TCP equivalent of a UDP
         // broadcast given the "no std::thread" constraint, not a true
         // simultaneous send, but every agent receives the same tick
         // before the replayer advances to the next one.
+        //
+        // Sequential sends mean whoever is sent to first gets a head start
+        // in the race for the lock. To keep the race fair, the starting
+        // agent rotates every tick (round-robin), so no agent is
+        // permanently first in line.
         std::vector<size_t> dead_client_indices;
+        const size_t client_count = agent_clients.size();
+        const size_t start_index = static_cast<size_t>(sequence % client_count);
 
-        for (size_t i = 0; i < agent_clients.size(); ++i)
+        for (size_t offset = 0; offset < client_count; ++offset)
         {
+            size_t i = (start_index + offset) % client_count;
+
+            // Stamped immediately before each agent's own send(), so an
+            // agent's measured latency doesn't include the time spent
+            // sending to the agents ahead of it in this round.
+            tick.replay_send_timestamp_ns = now_nanoseconds();
+
             if (!agent_clients[i]->send_all(reinterpret_cast<const char *>(&tick), sizeof(TickData)))
             {
                 Logger::error("Replayer: send to an agent failed; removing it from the broadcast list.");
@@ -181,9 +196,12 @@ int main(int argc, char *argv[])
             }
         }
 
+        // Rotation means failures aren't recorded in index order, so sort
+        // before erasing highest-index-first (keeps earlier indices valid).
+        std::sort(dead_client_indices.begin(), dead_client_indices.end());
         for (auto it = dead_client_indices.rbegin(); it != dead_client_indices.rend(); ++it)
         {
-            agent_clients.erase(agent_clients.begin() + static_cast<long>(*it));
+            agent_clients.erase(agent_clients.begin() + static_cast<std::ptrdiff_t>(*it));
         }
 
         if (agent_clients.empty())
